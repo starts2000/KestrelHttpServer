@@ -23,6 +23,13 @@ namespace Microsoft.AspNetCore.Server.Kestrel.Core.Internal.Http2
 {
     public class Http2Connection : ITimeoutControl, IHttp2StreamLifetimeHandler, IHttpHeadersHandler, IRequestProcessor
     {
+        private enum ConnectionState
+        {
+            Open,
+            Closing,
+            Closed
+        }
+
         private enum RequestHeaderParsingState
         {
             Ready,
@@ -74,7 +81,7 @@ namespace Microsoft.AspNetCore.Server.Kestrel.Core.Internal.Http2
         private bool _isMethodConnect;
         private int _highestOpenedStreamId;
 
-        private bool _stopping;
+        private ConnectionState _state = ConnectionState.Open;
 
         private readonly ConcurrentDictionary<int, Http2Stream> _streams = new ConcurrentDictionary<int, Http2Stream>();
 
@@ -95,19 +102,36 @@ namespace Microsoft.AspNetCore.Server.Kestrel.Core.Internal.Http2
 
         public void OnInputOrOutputCompleted()
         {
-            _stopping = true;
+            _state = ConnectionState.Closed;
             _frameWriter.Complete();
         }
 
         public void Abort(ConnectionAbortedException ex)
         {
-            _stopping = true;
+            _state = ConnectionState.Closed;
+            _frameWriter.WriteGoAwayAsync(_highestOpenedStreamId, Http2ErrorCode.INTERNAL_ERROR).GetAwaiter().GetResult();
             _frameWriter.Abort(ex);
         }
 
         public void StopProcessingNextRequest()
+            => StopProcessingNextRequest(true);
+
+        public void StopProcessingNextRequest(bool keepProcessingPendingRequests)
         {
-            _stopping = true;
+            if (keepProcessingPendingRequests)
+            {
+                // Send GOAWAY but keep processing requests
+                _state = ConnectionState.Closing;
+                // Int32.MaxValue is 2^31 - 1
+                _frameWriter.WriteGoAwayAsync(Int32.MaxValue, Http2ErrorCode.NO_ERROR).GetAwaiter().GetResult();
+            }
+            else
+            {
+                // Stop processing immediately
+                _state = ConnectionState.Closed;
+                _frameWriter.WriteGoAwayAsync(_highestOpenedStreamId, Http2ErrorCode.NO_ERROR).GetAwaiter().GetResult();
+            }
+            // Wake up request processing loop so if there are no pending requests the connection can complete
             Input.CancelPendingRead();
         }
 
@@ -125,12 +149,12 @@ namespace Microsoft.AspNetCore.Server.Kestrel.Core.Internal.Http2
                     return;
                 }
 
-                if (!_stopping)
+                if (_state != ConnectionState.Closed)
                 {
                     await _frameWriter.WriteSettingsAsync(_serverSettings);
                 }
 
-                while (!_stopping)
+                while (_state == ConnectionState.Open || (_state == ConnectionState.Closing) && !_streams.IsEmpty)
                 {
                     var result = await Input.ReadAsync();
                     var readableBuffer = result.Buffer;
@@ -239,7 +263,7 @@ namespace Microsoft.AspNetCore.Server.Kestrel.Core.Internal.Http2
 
         private async Task<bool> TryReadPrefaceAsync()
         {
-            while (!_stopping)
+            while (_state != ConnectionState.Closed)
             {
                 var result = await Input.ReadAsync();
                 var readableBuffer = result.Buffer;
@@ -618,7 +642,13 @@ namespace Microsoft.AspNetCore.Server.Kestrel.Core.Internal.Http2
                 throw new Http2ConnectionErrorException(CoreStrings.FormatHttp2ErrorStreamIdNotZero(_incomingFrame.Type), Http2ErrorCode.PROTOCOL_ERROR);
             }
 
-            StopProcessingNextRequest();
+            if (_state == ConnectionState.Open)
+            {
+                // Immediately close the connection upon receiving a GoAway
+                // TODO: consider continue processing requests in flight
+                StopProcessingNextRequest(keepProcessingPendingRequests: false);
+            }
+
             return Task.CompletedTask;
         }
 
@@ -812,6 +842,11 @@ namespace Microsoft.AspNetCore.Server.Kestrel.Core.Internal.Http2
         void IHttp2StreamLifetimeHandler.OnStreamCompleted(int streamId)
         {
             _streams.TryRemove(streamId, out _);
+
+            if (_state == ConnectionState.Closing && _streams.IsEmpty)
+            {
+                _state = ConnectionState.Closed;
+            }
         }
 
         public void OnHeader(Span<byte> name, Span<byte> value)
