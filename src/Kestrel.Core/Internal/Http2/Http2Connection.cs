@@ -798,9 +798,9 @@ namespace Microsoft.AspNetCore.Server.Kestrel.Core.Internal.Http2
 
         private void StartStream<TContext>(IHttpApplication<TContext> application)
         {
-            if (_stateManager.State != ConnectionState.Open)
+            if (_stateManager.State == ConnectionState.Closed)
             {
-                // Do not start new streams when the connection is in the process of shutting down
+                // Do not start new streams when the connection is shutting down
                 return;
             }
 
