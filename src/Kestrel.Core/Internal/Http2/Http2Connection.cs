@@ -140,24 +140,13 @@ namespace Microsoft.AspNetCore.Server.Kestrel.Core.Internal.Http2
         public void StopProcessingNextRequest()
             => StopProcessingNextRequest(true);
 
-        public void StopProcessingNextRequest(bool keepProcessingPendingRequests)
+        public void StopProcessingNextRequest(bool sendGoAway = false)
         {
-            if (keepProcessingPendingRequests)
+            // Send GOAWAY but keep processing requests
+            if (_stateManager.CompareExchange(ConnectionState.Closing, ConnectionState.Open) == ConnectionState.Open && sendGoAway)
             {
-                // Send GOAWAY but keep processing requests
-                if (_stateManager.CompareExchange(ConnectionState.Closing, ConnectionState.Open) == ConnectionState.Open)
-                {
-                    // Int32.MaxValue is 2^31 - 1
-                    _frameWriter.WriteGoAwayAsync(Int32.MaxValue, Http2ErrorCode.NO_ERROR).ConfigureAwait(false).GetAwaiter().GetResult();
-                }
-            }
-            else
-            {
-                // Stop processing immediately
-                if (_stateManager.Exchange(ConnectionState.Closed) != ConnectionState.Closed)
-                {
-                    _frameWriter.WriteGoAwayAsync(_highestOpenedStreamId, Http2ErrorCode.NO_ERROR).ConfigureAwait(false).GetAwaiter().GetResult();
-                }
+                // Int32.MaxValue is 2^31 - 1
+                _frameWriter.WriteGoAwayAsync(Int32.MaxValue, Http2ErrorCode.NO_ERROR).ConfigureAwait(false).GetAwaiter().GetResult();
             }
             // Wake up request processing loop so the connection can complete if there are no pending requests
             Input.CancelPendingRead();
@@ -675,8 +664,7 @@ namespace Microsoft.AspNetCore.Server.Kestrel.Core.Internal.Http2
             }
 
             // Immediately close the connection upon receiving a GoAway
-            // TODO: consider continue processing requests in flight
-            StopProcessingNextRequest(keepProcessingPendingRequests: false);
+            StopProcessingNextRequest(sendGoAway: false);
 
             return Task.CompletedTask;
         }
@@ -880,7 +868,10 @@ namespace Microsoft.AspNetCore.Server.Kestrel.Core.Internal.Http2
 
             if (_stateManager.State == ConnectionState.Closing && _streams.IsEmpty)
             {
-                _stateManager.Exchange(ConnectionState.Closed);
+                if (_stateManager.Exchange(ConnectionState.Closed) != ConnectionState.Closed)
+                {
+                    _frameWriter.WriteGoAwayAsync(_highestOpenedStreamId, Http2ErrorCode.NO_ERROR).ConfigureAwait(false).GetAwaiter().GetResult();
+                }
                 // Wake up request processing loop so the connection can complete if there are no pending requests
                 Input.CancelPendingRead();
             }

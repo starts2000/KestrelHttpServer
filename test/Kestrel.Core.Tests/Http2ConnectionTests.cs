@@ -2061,6 +2061,10 @@ namespace Microsoft.AspNetCore.Server.Kestrel.Core.Tests
 
             await SendGoAwayAsync();
 
+            await SendRstStreamAsync(1);
+            await SendRstStreamAsync(3);
+            await SendRstStreamAsync(5);
+
             await WaitForConnectionStopAsync(expectedLastStreamId: 5, ignoreNonGoAwayFrames: true);
 
             await WaitForAllStreamsAsync();
@@ -2161,6 +2165,10 @@ namespace Microsoft.AspNetCore.Server.Kestrel.Core.Tests
 
             await SendGoAwayAsync();
 
+            await SendRstStreamAsync(1);
+            await SendRstStreamAsync(3);
+            await SendRstStreamAsync(5);
+
             await WaitForConnectionStopAsync(expectedLastStreamId: 5, ignoreNonGoAwayFrames: false);
 
             await WaitForAllStreamsAsync();
@@ -2234,6 +2242,10 @@ namespace Microsoft.AspNetCore.Server.Kestrel.Core.Tests
             await VerifyStreamBackpressure(5);
 
             await SendGoAwayAsync();
+
+            await SendRstStreamAsync(1);
+            await SendRstStreamAsync(3);
+            await SendRstStreamAsync(5);
 
             await WaitForConnectionStopAsync(expectedLastStreamId: 5, ignoreNonGoAwayFrames: false);
 
@@ -2417,7 +2429,7 @@ namespace Microsoft.AspNetCore.Server.Kestrel.Core.Tests
             {
                 try
                 {
-                    // Flush the headers so expectingDataSem is released. 
+                    // Flush the headers so expectingDataSem is released.
                     await context.Response.Body.FlushAsync();
 
                     for (var i = 0; i < expectedFullFrameCountBeforeBackpressure; i++)
