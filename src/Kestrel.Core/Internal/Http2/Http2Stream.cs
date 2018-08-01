@@ -52,7 +52,7 @@ namespace Microsoft.AspNetCore.Server.Kestrel.Core.Internal.Http2
 
         public bool RequestBodyStarted { get; private set; }
         public bool EndStreamReceived => (_completionState & StreamCompletionFlags.EndStreamReceived) == StreamCompletionFlags.EndStreamReceived;
-        public bool IsAborted => (_completionState & StreamCompletionFlags.Aborted) == StreamCompletionFlags.Aborted;
+        private bool IsAborted => (_completionState & StreamCompletionFlags.Aborted) == StreamCompletionFlags.Aborted;
 
         public override bool IsUpgradableRequest => false;
 
@@ -280,6 +280,23 @@ namespace Microsoft.AspNetCore.Server.Kestrel.Core.Internal.Http2
             {
                 RequestBodyStarted = true;
 
+                if (endStream)
+                {
+                    // No need to send any more window updates for this stream now that we've received all the data.
+                    // Call before flushing the request body pipe, because that might induce a window update.
+                    _inputFlowControl.StopWindowUpdates();
+                }
+
+                _inputFlowControl.Advance(payload.Count);
+
+                if (IsAborted)
+                {
+                    // Ignore data frames for aborted streams, but only after counting them for purposes of connection level flow control.
+                    return Task.CompletedTask;
+                }
+
+                // This check happens after flow control so that when we throw and abort, the byte count is returned to the connection
+                // level accounting.
                 if (InputRemaining.HasValue)
                 {
                     // https://tools.ietf.org/html/rfc7540#section-8.1.2.6
@@ -290,16 +307,6 @@ namespace Microsoft.AspNetCore.Server.Kestrel.Core.Internal.Http2
 
                     InputRemaining -= payload.Count;
                 }
-
-                if (endStream)
-                {
-
-                    // No need to send any more window updates for this stream now that we've received all the data.
-                    // Call before flushing the request body pipe, because that might induce a window update.
-                    _inputFlowControl.StopWindowUpdates();
-                }
-
-                _inputFlowControl.Advance(payload.Count);
 
                 RequestBodyPipe.Writer.Write(payload);
                 var flushTask = RequestBodyPipe.Writer.FlushAsync();

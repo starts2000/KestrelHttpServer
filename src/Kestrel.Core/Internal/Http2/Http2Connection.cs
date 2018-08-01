@@ -373,12 +373,6 @@ namespace Microsoft.AspNetCore.Server.Kestrel.Core.Internal.Http2
                     throw new Http2ConnectionErrorException(CoreStrings.FormatHttp2ErrorStreamHalfClosedRemote(_incomingFrame.Type, stream.StreamId), Http2ErrorCode.STREAM_CLOSED);
                 }
 
-                if (stream.IsAborted)
-                {
-                    // Ignore data frames for aborted streams.
-                    return Task.CompletedTask;
-                }
-
                 return stream.OnDataAsync(_incomingFrame);
             }
 
