@@ -121,15 +121,6 @@ namespace Microsoft.AspNetCore.Server.Kestrel.Core.Internal.Http2
         }
 
         // internal for testing
-        internal int StreamCount
-        {
-            get
-            {
-                return _streams.Count;
-            }
-        }
-
-        // internal for testing
         internal int HighestOpenedStreamId
         {
             get

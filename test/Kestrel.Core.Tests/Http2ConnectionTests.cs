@@ -2979,11 +2979,16 @@ namespace Microsoft.AspNetCore.Server.Kestrel.Core.Tests
         }
 
         [Fact]
-        public async Task StopProcessingNextRequestSendsGracefulGOAWAY()
+        public async Task GracefulGOAWAYSentByStopProcessingNextRequest()
         {
             await InitializeConnectionAsync(_noopApplication);
 
             await StartStreamAsync(1, _browserRequestHeaders, endStream: true);
+
+            // Ping to ensure connection had time to process the GOAWAY
+            await SendPingAsync(Http2PingFrameFlags.NONE);
+            await ReceiveFrameAsync();
+
             _connection.StopProcessingNextRequest();
             Assert.Equal(Http2Connection.ConnectionState.Closing, _connection.State);
 
@@ -3006,11 +3011,16 @@ namespace Microsoft.AspNetCore.Server.Kestrel.Core.Tests
         }
 
         [Fact]
-        public async Task StopProcessingNextRequestSendsFinalGOAWAYWhenAllStreamsComplete()
+        public async Task FinalGOAWAYSentByStopProcessingNextRequestWhenAllStreamsComplete()
         {
             await InitializeConnectionAsync(_noopApplication);
 
             await StartStreamAsync(1, _browserRequestHeaders, endStream: true);
+
+            // Ping to ensure connection had time to process the GOAWAY
+            await SendPingAsync(Http2PingFrameFlags.NONE);
+            await ReceiveFrameAsync();
+
             _connection.StopProcessingNextRequest();
             Assert.Equal(Http2Connection.ConnectionState.Closing, _connection.State);
 
@@ -3024,6 +3034,10 @@ namespace Microsoft.AspNetCore.Server.Kestrel.Core.Tests
             await SendRstStreamAsync(1);
 
             frame = await ReceiveFrameAsync();
+            while (frame.Type != Http2FrameType.GOAWAY)
+            {
+                frame = await ReceiveFrameAsync();
+            }
             Assert.Equal(Http2Connection.ConnectionState.Closed, _connection.State);
             VerifyGoAway(frame, 1, Http2ErrorCode.NO_ERROR);
         }
@@ -3031,38 +3045,32 @@ namespace Microsoft.AspNetCore.Server.Kestrel.Core.Tests
         [Fact]
         public async Task AcceptNewStreamsDuringClosingConnection()
         {
-            await InitializeConnectionAsync(_noopApplication);
+            await InitializeConnectionAsync(_waitForAbortApplication);
 
             await StartStreamAsync(1, _browserRequestHeaders, endStream: true);
-            //// Ping to ensure connection had time to start the stream
-            //await SendPingAsync(Http2PingFrameFlags.NONE);
-            //await ReceiveFrameAsync();
 
             Assert.Equal(Http2Connection.ConnectionState.Open, _connection.State);
-            Assert.Equal(1, _connection.StreamCount);
             Assert.Equal(1, _connection.HighestOpenedStreamId);
 
-            _connection.StopProcessingNextRequest();
+            await SendGoAwayAsync();
 
+            var spinLimit = 50; // 2.5 seconds
+            while (_connection.State == Http2Connection.ConnectionState.Open && spinLimit-- > 0)
+            {
+                await Task.Delay(50);
+            }
             Assert.Equal(Http2Connection.ConnectionState.Closing, _connection.State);
-            var frame = await ReceiveFrameAsync();
-            VerifyGoAway(frame, Int32.MaxValue, Http2ErrorCode.NO_ERROR);
 
             await StartStreamAsync(3, _browserRequestHeaders, endStream: true);
-            // Ping to ensure connection had time to start the stream
-            await SendPingAsync(Http2PingFrameFlags.NONE);
-            await ReceiveFrameAsync();
 
             Assert.Equal(Http2Connection.ConnectionState.Closing, _connection.State);
-            Assert.Equal(2, _connection.StreamCount);
             Assert.Equal(3, _connection.HighestOpenedStreamId);
 
             await SendRstStreamAsync(1);
             await SendRstStreamAsync(3);
 
-            frame = await ReceiveFrameAsync();
-            Assert.Equal(Http2Connection.ConnectionState.Closed, _connection.State);
-            VerifyGoAway(frame, 3, Http2ErrorCode.NO_ERROR);
+            await WaitForConnectionStopAsync(expectedLastStreamId: 3, ignoreNonGoAwayFrames: true);
+            await WaitForAllStreamsAsync();
         }
 
         [Fact]
@@ -3071,25 +3079,21 @@ namespace Microsoft.AspNetCore.Server.Kestrel.Core.Tests
             await InitializeConnectionAsync(_noopApplication);
 
             await StartStreamAsync(1, _browserRequestHeaders, endStream: true);
-            //// Ping to ensure connection had time to start the stream
-            //await SendPingAsync(Http2PingFrameFlags.NONE);
-            //await ReceiveFrameAsync();
 
             Assert.Equal(Http2Connection.ConnectionState.Open, _connection.State);
-            Assert.Equal(1, _connection.StreamCount);
             Assert.Equal(1, _connection.HighestOpenedStreamId);
 
             _connection.OnInputOrOutputCompleted();
             Assert.Equal(Http2Connection.ConnectionState.Closed, _connection.State);
 
             await StartStreamAsync(3, _browserRequestHeaders, endStream: true);
-            // Ping to ensure connection had time to start the stream
-            await SendPingAsync(Http2PingFrameFlags.NONE);
-            await ReceiveFrameAsync();
 
             Assert.Equal(Http2Connection.ConnectionState.Closed, _connection.State);
-            Assert.Equal(1, _connection.StreamCount);
             Assert.Equal(1, _connection.HighestOpenedStreamId);
+
+            await SendRstStreamAsync(1);
+
+            await WaitForConnectionStopAsync(expectedLastStreamId: 1, ignoreNonGoAwayFrames: true);
         }
 
         private async Task InitializeConnectionAsync(RequestDelegate application)
@@ -3110,7 +3114,7 @@ namespace Microsoft.AspNetCore.Server.Kestrel.Core.Tests
                 withStreamId: 0);
         }
 
-        private async Task StartStreamAsync(int streamId, IEnumerable<KeyValuePair<string, string>> headers, bool endStream)
+        private async Task StartStreamAsync(int streamId, IEnumerable<KeyValuePair<string, string>> headers, bool endStream, bool trackAsRunningStream = true)
         {
             var tcs = new TaskCompletionSource<object>(TaskCreationOptions.RunContinuationsAsynchronously);
             _runningStreams[streamId] = tcs;
