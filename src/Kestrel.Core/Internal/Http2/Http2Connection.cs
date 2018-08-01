@@ -43,7 +43,7 @@ namespace Microsoft.AspNetCore.Server.Kestrel.Core.Internal.Http2
             Unknown = 0x40000000
         }
 
-        private enum ConnectionState
+        internal enum ConnectionState
         {
             Open,
             Closing,
@@ -109,6 +109,33 @@ namespace Microsoft.AspNetCore.Server.Kestrel.Core.Internal.Http2
             _context = context;
             _frameWriter = new Http2FrameWriter(context.Transport.Output, context.Application.Input, _outputFlowControl, this);
             _hpackDecoder = new HPackDecoder((int)_serverSettings.HeaderTableSize);
+        }
+
+        // internal for testing
+        internal ConnectionState State
+        {
+            get
+            {
+                return _stateManager.State;
+            }
+        }
+
+        // internal for testing
+        internal int StreamCount
+        {
+            get
+            {
+                return _streams.Count;
+            }
+        }
+
+        // internal for testing
+        internal int HighestOpenedStreamId
+        {
+            get
+            {
+                return _highestOpenedStreamId;
+            }
         }
 
         public string ConnectionId => _context.ConnectionId;
@@ -663,7 +690,6 @@ namespace Microsoft.AspNetCore.Server.Kestrel.Core.Internal.Http2
                 throw new Http2ConnectionErrorException(CoreStrings.FormatHttp2ErrorStreamIdNotZero(_incomingFrame.Type), Http2ErrorCode.PROTOCOL_ERROR);
             }
 
-            // Immediately close the connection upon receiving a GoAway
             StopProcessingNextRequest(sendGoAway: false);
 
             return Task.CompletedTask;

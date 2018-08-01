@@ -2050,7 +2050,7 @@ namespace Microsoft.AspNetCore.Server.Kestrel.Core.Tests
         }
 
         [Fact]
-        public async Task GOAWAY_Received_AbortsAllStreams()
+        public async Task GOAWAY_Received_SetsConnectionStateToClosingAndWaitForAllStreamsToComplete()
         {
             await InitializeConnectionAsync(_waitForAbortApplication);
 
@@ -2060,6 +2060,13 @@ namespace Microsoft.AspNetCore.Server.Kestrel.Core.Tests
             await StartStreamAsync(5, _browserRequestHeaders, endStream: true);
 
             await SendGoAwayAsync();
+
+            var spinLimit = 50; // 2.5 seconds
+            while (_connection.State == Http2Connection.ConnectionState.Open && spinLimit --> 0)
+            {
+                await Task.Delay(50);
+            }
+            Assert.Equal(Http2Connection.ConnectionState.Closing, _connection.State);
 
             await SendRstStreamAsync(1);
             await SendRstStreamAsync(3);
@@ -2071,6 +2078,42 @@ namespace Microsoft.AspNetCore.Server.Kestrel.Core.Tests
             Assert.Contains(1, _abortedStreamIds);
             Assert.Contains(3, _abortedStreamIds);
             Assert.Contains(5, _abortedStreamIds);
+        }
+
+        [Fact]
+        public async Task GOAWAY_Received_DoesNotTransitionFromClosedToClosing()
+        {
+            await InitializeConnectionAsync(_waitForAbortApplication);
+
+            _connection.OnInputOrOutputCompleted();
+
+            Assert.Equal(Http2Connection.ConnectionState.Closed, _connection.State);
+
+            await SendGoAwayAsync();
+
+            // Ping to ensure connection had time to process the GOAWAY
+            await SendPingAsync(Http2PingFrameFlags.NONE);
+            await ReceiveFrameAsync();
+
+            Assert.Equal(Http2Connection.ConnectionState.Closed, _connection.State);
+        }
+
+        [Fact]
+        public async Task StopProcessingNextRequest_DoesNotTransitionFromClosedToClosing()
+        {
+            await InitializeConnectionAsync(_waitForAbortApplication);
+
+            _connection.StopProcessingNextRequest();
+
+            Assert.Equal(Http2Connection.ConnectionState.Closed, _connection.State);
+
+            await SendGoAwayAsync();
+
+            // Ping to ensure connection had time to process the GOAWAY
+            await SendPingAsync(Http2PingFrameFlags.NONE);
+            await ReceiveFrameAsync();
+
+            Assert.Equal(Http2Connection.ConnectionState.Closed, _connection.State);
         }
 
         [Fact]
@@ -2898,6 +2941,157 @@ namespace Microsoft.AspNetCore.Server.Kestrel.Core.Tests
             Assert.DoesNotContain(_logger.Messages, m => m.Exception is ConnectionResetException);
         }
 
+        [Fact]
+        public async Task OnInputOrOutputCompletedSendsFinalGOAWAY()
+        {
+            await InitializeConnectionAsync(_noopApplication);
+
+            _connection.OnInputOrOutputCompleted();
+            Assert.Equal(Http2Connection.ConnectionState.Closed, _connection.State);
+
+            var frame = await ReceiveFrameAsync();
+            VerifyGoAway(frame, 0, Http2ErrorCode.NO_ERROR);
+        }
+
+        [Fact]
+        public async Task AbortSendsFinalGOAWAY()
+        {
+            await InitializeConnectionAsync(_noopApplication);
+
+            _connection.Abort(new ConnectionAbortedException());
+            Assert.Equal(Http2Connection.ConnectionState.Closed, _connection.State);
+
+            var frame = await ReceiveFrameAsync();
+            VerifyGoAway(frame, 0, Http2ErrorCode.INTERNAL_ERROR);
+        }
+
+        [Fact]
+        public async Task CompletionSendsFinalGOAWAY()
+        {
+            await InitializeConnectionAsync(_noopApplication);
+
+            // Completes ProcessRequestsAsync
+            _pair.Application.Output.Complete();
+            Assert.Equal(Http2Connection.ConnectionState.Closed, _connection.State);
+
+            var frame = await ReceiveFrameAsync();
+            VerifyGoAway(frame, 0, Http2ErrorCode.NO_ERROR);
+        }
+
+        [Fact]
+        public async Task StopProcessingNextRequestSendsGracefulGOAWAY()
+        {
+            await InitializeConnectionAsync(_noopApplication);
+
+            await StartStreamAsync(1, _browserRequestHeaders, endStream: true);
+            _connection.StopProcessingNextRequest();
+            Assert.Equal(Http2Connection.ConnectionState.Closing, _connection.State);
+
+            var frame = await ReceiveFrameAsync();
+            while (frame.Type != Http2FrameType.GOAWAY)
+            {
+                frame = await ReceiveFrameAsync();
+            }
+            VerifyGoAway(frame, Int32.MaxValue, Http2ErrorCode.NO_ERROR);
+
+            _connection.OnInputOrOutputCompleted();
+            Assert.Equal(Http2Connection.ConnectionState.Closed, _connection.State);
+
+            frame = await ReceiveFrameAsync();
+            while (frame.Type != Http2FrameType.GOAWAY)
+            {
+                frame = await ReceiveFrameAsync();
+            }
+            VerifyGoAway(frame, 1, Http2ErrorCode.NO_ERROR);
+        }
+
+        [Fact]
+        public async Task StopProcessingNextRequestSendsFinalGOAWAYWhenAllStreamsComplete()
+        {
+            await InitializeConnectionAsync(_noopApplication);
+
+            await StartStreamAsync(1, _browserRequestHeaders, endStream: true);
+            _connection.StopProcessingNextRequest();
+            Assert.Equal(Http2Connection.ConnectionState.Closing, _connection.State);
+
+            var frame = await ReceiveFrameAsync();
+            while (frame.Type != Http2FrameType.GOAWAY)
+            {
+                frame = await ReceiveFrameAsync();
+            }
+            VerifyGoAway(frame, Int32.MaxValue, Http2ErrorCode.NO_ERROR);
+
+            await SendRstStreamAsync(1);
+
+            frame = await ReceiveFrameAsync();
+            Assert.Equal(Http2Connection.ConnectionState.Closed, _connection.State);
+            VerifyGoAway(frame, 1, Http2ErrorCode.NO_ERROR);
+        }
+
+        [Fact]
+        public async Task AcceptNewStreamsDuringClosingConnection()
+        {
+            await InitializeConnectionAsync(_noopApplication);
+
+            await StartStreamAsync(1, _browserRequestHeaders, endStream: true);
+            //// Ping to ensure connection had time to start the stream
+            //await SendPingAsync(Http2PingFrameFlags.NONE);
+            //await ReceiveFrameAsync();
+
+            Assert.Equal(Http2Connection.ConnectionState.Open, _connection.State);
+            Assert.Equal(1, _connection.StreamCount);
+            Assert.Equal(1, _connection.HighestOpenedStreamId);
+
+            _connection.StopProcessingNextRequest();
+
+            Assert.Equal(Http2Connection.ConnectionState.Closing, _connection.State);
+            var frame = await ReceiveFrameAsync();
+            VerifyGoAway(frame, Int32.MaxValue, Http2ErrorCode.NO_ERROR);
+
+            await StartStreamAsync(3, _browserRequestHeaders, endStream: true);
+            // Ping to ensure connection had time to start the stream
+            await SendPingAsync(Http2PingFrameFlags.NONE);
+            await ReceiveFrameAsync();
+
+            Assert.Equal(Http2Connection.ConnectionState.Closing, _connection.State);
+            Assert.Equal(2, _connection.StreamCount);
+            Assert.Equal(3, _connection.HighestOpenedStreamId);
+
+            await SendRstStreamAsync(1);
+            await SendRstStreamAsync(3);
+
+            frame = await ReceiveFrameAsync();
+            Assert.Equal(Http2Connection.ConnectionState.Closed, _connection.State);
+            VerifyGoAway(frame, 3, Http2ErrorCode.NO_ERROR);
+        }
+
+        [Fact]
+        public async Task RejectNewStreamsDuringClosedConnection()
+        {
+            await InitializeConnectionAsync(_noopApplication);
+
+            await StartStreamAsync(1, _browserRequestHeaders, endStream: true);
+            //// Ping to ensure connection had time to start the stream
+            //await SendPingAsync(Http2PingFrameFlags.NONE);
+            //await ReceiveFrameAsync();
+
+            Assert.Equal(Http2Connection.ConnectionState.Open, _connection.State);
+            Assert.Equal(1, _connection.StreamCount);
+            Assert.Equal(1, _connection.HighestOpenedStreamId);
+
+            _connection.OnInputOrOutputCompleted();
+            Assert.Equal(Http2Connection.ConnectionState.Closed, _connection.State);
+
+            await StartStreamAsync(3, _browserRequestHeaders, endStream: true);
+            // Ping to ensure connection had time to start the stream
+            await SendPingAsync(Http2PingFrameFlags.NONE);
+            await ReceiveFrameAsync();
+
+            Assert.Equal(Http2Connection.ConnectionState.Closed, _connection.State);
+            Assert.Equal(1, _connection.StreamCount);
+            Assert.Equal(1, _connection.HighestOpenedStreamId);
+        }
+
         private async Task InitializeConnectionAsync(RequestDelegate application)
         {
             _connectionTask = _connection.ProcessRequestsAsync(new DummyApplication(application));
@@ -3396,6 +3590,16 @@ namespace Microsoft.AspNetCore.Server.Kestrel.Core.Tests
             return WaitForConnectionErrorAsync<Exception>(ignoreNonGoAwayFrames, expectedLastStreamId, Http2ErrorCode.NO_ERROR, expectedErrorMessage: null);
         }
 
+        private void VerifyGoAway(Http2Frame frame, int expectedLastStreamId, Http2ErrorCode expectedErrorCode)
+        {
+            Assert.Equal(Http2FrameType.GOAWAY, frame.Type);
+            Assert.Equal(8, frame.Length);
+            Assert.Equal(0, frame.Flags);
+            Assert.Equal(0, frame.StreamId);
+            Assert.Equal(expectedLastStreamId, frame.GoAwayLastStreamId);
+            Assert.Equal(expectedErrorCode, frame.GoAwayErrorCode);
+        }
+
         private async Task WaitForConnectionErrorAsync<TException>(bool ignoreNonGoAwayFrames, int expectedLastStreamId, Http2ErrorCode expectedErrorCode, string expectedErrorMessage)
             where TException : Exception
         {
@@ -3409,12 +3613,7 @@ namespace Microsoft.AspNetCore.Server.Kestrel.Core.Tests
                 }
             }
 
-            Assert.Equal(Http2FrameType.GOAWAY, frame.Type);
-            Assert.Equal(8, frame.Length);
-            Assert.Equal(0, frame.Flags);
-            Assert.Equal(0, frame.StreamId);
-            Assert.Equal(expectedLastStreamId, frame.GoAwayLastStreamId);
-            Assert.Equal(expectedErrorCode, frame.GoAwayErrorCode);
+            VerifyGoAway(frame, expectedLastStreamId, expectedErrorCode);
 
             if (expectedErrorMessage != null)
             {
