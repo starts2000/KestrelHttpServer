@@ -141,7 +141,7 @@ namespace Microsoft.AspNetCore.Server.Kestrel.Core.Internal.Http2
         {
             if (_stateManager.Exchange(ConnectionState.Closed) != ConnectionState.Closed)
             {
-                _frameWriter.WriteGoAwayAsync(_highestOpenedStreamId, Http2ErrorCode.NO_ERROR).ConfigureAwait(false).GetAwaiter().GetResult();
+                _frameWriter.WriteGoAwayAsync(_highestOpenedStreamId, Http2ErrorCode.NO_ERROR);
             }
             _frameWriter.Complete();
         }
@@ -150,7 +150,7 @@ namespace Microsoft.AspNetCore.Server.Kestrel.Core.Internal.Http2
         {
             if (_stateManager.Exchange(ConnectionState.Closed) != ConnectionState.Closed)
             {
-                _frameWriter.WriteGoAwayAsync(_highestOpenedStreamId, Http2ErrorCode.INTERNAL_ERROR).ConfigureAwait(false).GetAwaiter().GetResult();
+                _frameWriter.WriteGoAwayAsync(_highestOpenedStreamId, Http2ErrorCode.INTERNAL_ERROR);
             }
             _frameWriter.Abort(ex);
         }
@@ -164,7 +164,7 @@ namespace Microsoft.AspNetCore.Server.Kestrel.Core.Internal.Http2
             if (_stateManager.CompareExchange(ConnectionState.Closing, ConnectionState.Open) == ConnectionState.Open && sendGoAway)
             {
                 // Int32.MaxValue is 2^31 - 1
-                _frameWriter.WriteGoAwayAsync(Int32.MaxValue, Http2ErrorCode.NO_ERROR).ConfigureAwait(false).GetAwaiter().GetResult();
+                _frameWriter.WriteGoAwayAsync(Int32.MaxValue, Http2ErrorCode.NO_ERROR);
             }
             // Wake up request processing loop so the connection can complete if there are no pending requests
             Input.CancelPendingRead();
@@ -887,7 +887,7 @@ namespace Microsoft.AspNetCore.Server.Kestrel.Core.Internal.Http2
             {
                 if (_stateManager.Exchange(ConnectionState.Closed) != ConnectionState.Closed)
                 {
-                    _frameWriter.WriteGoAwayAsync(_highestOpenedStreamId, Http2ErrorCode.NO_ERROR).ConfigureAwait(false).GetAwaiter().GetResult();
+                    _frameWriter.WriteGoAwayAsync(_highestOpenedStreamId, Http2ErrorCode.NO_ERROR);
                 }
                 // Wake up request processing loop so the connection can complete if there are no pending requests
                 Input.CancelPendingRead();

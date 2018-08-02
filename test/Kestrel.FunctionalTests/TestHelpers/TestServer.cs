@@ -45,20 +45,20 @@ namespace Microsoft.AspNetCore.Server.Kestrel.FunctionalTests
         }
 
         public TestServer(RequestDelegate app, TestServiceContext context, ListenOptions listenOptions, Action<IServiceCollection> configureServices)
-            : this(app, context, options => options.ListenOptions.Add(listenOptions), configureServices)
+            : this(TransportSelector.GetWebHostBuilder(), app, context, options => options.ListenOptions.Add(listenOptions), configureServices)
         {
         }
         public TestServer(RequestDelegate app, TestServiceContext context, Action<KestrelServerOptions> configureKestrel)
-            : this(app, context, configureKestrel, _ => { })
+            : this(TransportSelector.GetWebHostBuilder(), app, context, configureKestrel, _ => { })
         {
         }
 
-        public TestServer(RequestDelegate app, TestServiceContext context, Action<KestrelServerOptions> configureKestrel, Action<IServiceCollection> configureServices)
+        public TestServer(IWebHostBuilder builder, RequestDelegate app, TestServiceContext context, Action<KestrelServerOptions> configureKestrel, Action<IServiceCollection> configureServices)
         {
             _app = app;
             Context = context;
 
-            _host = TransportSelector.GetWebHostBuilder()
+            _host = builder
                 .UseKestrel(options =>
                 {
                     configureKestrel(options);
